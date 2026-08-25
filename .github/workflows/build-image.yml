@@ -1,0 +1,63 @@
+# Build the provider binary and publish it to ghcr.io.
+#
+# provider-opentofu copies the binary out of this image into a filesystem
+# mirror; see the DeploymentRuntimeConfig in
+# kremlin/ns/crossplane-system/manifests/crossplane.rb. This fork is not on a
+# provider registry, so the mirror is how the workspace resolves it.
+name: Build provider image
+
+on:
+  push:
+    branches: [main]
+    # Documentation-only commits cannot change the binary, and the docs job
+    # pushes one of those on every schema change.
+    paths-ignore:
+      - "docs/**"
+      - "examples/**"
+      - "**/*.md"
+  workflow_dispatch:
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      # Required to push to ghcr.io with the built-in GITHUB_TOKEN.
+      packages: write
+
+    concurrency:
+      group: build-provider-image
+      cancel-in-progress: true
+
+    env:
+      REGISTRY: ghcr.io
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The repository owner, lowercased: ghcr.io rejects capitals in a path,
+      # while github.repository_owner preserves whatever case the account uses.
+      - name: Resolve image name
+        run: echo "IMAGE=${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_ENV"
+
+      # docker login rather than a third-party action: one less unpinned
+      # dependency for zizmor to flag, and the token is already in scope.
+      - name: Log in to ghcr.io
+        run: echo '${{ secrets.GITHUB_TOKEN }}' | docker login "$REGISTRY" -u '${{ github.actor }}' --password-stdin
+
+      - name: Build image
+        run: docker build -t "$IMAGE:${{ github.sha }}" -t "$IMAGE:latest" .
+
+      - name: Push image
+        run: |
+          docker push "$IMAGE:${{ github.sha }}"
+          docker push "$IMAGE:latest"
+
+      - name: Summary
+        run: |
+          echo "Pushed \`$IMAGE:latest\` and \`$IMAGE:${{ github.sha }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "The package must be **public** for the cluster to pull it without an imagePullSecret." >> "$GITHUB_STEP_SUMMARY"

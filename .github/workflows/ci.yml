@@ -27,11 +27,20 @@ jobs:
           version: latest
 
   docs:
+    name: Docs
     runs-on: ubuntu-latest
+    # Needed by the commit-back step below; the workflow default is read-only.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          persist-credentials: false
+          # Docs are generated from the provider schema, so they drift every
+          # time the schema changes. Rather than failing and asking a human to
+          # run `make docs`, this job regenerates and commits the result -- which
+          # needs the credentials left in place and a real branch to push to.
+          persist-credentials: true
+          ref: ${{ github.head_ref || github.ref_name }}
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: "go.mod"
@@ -41,10 +50,37 @@ jobs:
         with:
           terraform_wrapper: false
       - run: make docs
-      - name: git diff
+      - name: Commit regenerated docs
+        env:
+          # A pull_request build from a FORK gets a read-only token, so pushing
+          # would fail. Fall back to the old behaviour there: report the drift
+          # and let the contributor run `make docs` themselves.
+          CAN_PUSH: ${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}
         run: |
-          git diff --compact-summary --exit-code || \
-            (echo; echo "Unexpected difference in directories after code generation. Run 'make docs' command and commit."; exit 1)
+          # `make docs` also runs `terraform fmt` over examples/, so both trees
+          # can legitimately change here.
+          if git diff --quiet -- docs examples; then
+            echo "Documentation is already up to date."
+            exit 0
+          fi
+
+          git diff --compact-summary -- docs examples
+
+          if [ "$CAN_PUSH" != "true" ]; then
+            echo
+            echo "Documentation is out of date and this build cannot push to the source branch."
+            echo "Run 'make docs' and commit the result."
+            exit 1
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs examples
+          # [skip ci] so the push this creates does not trigger another build --
+          # it would regenerate identical docs and commit nothing, but it still
+          # costs a full matrix.
+          git commit -m "docs: regenerate from provider schema [skip ci]"
+          git push origin HEAD:"${{ github.head_ref || github.ref_name }}"
 
   build:
     name: Build
